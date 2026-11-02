@@ -1,0 +1,51 @@
+# Builds a self-contained zed.exe from the PR branch so the manual UI check can be done
+# without setting up a Windows toolchain locally. Lives on a throwaway branch of the fork;
+# the pull request branch does not contain this file.
+#
+# `util/debug-embed` embeds the assets/ tree at compile time. Without it, dev builds read
+# assets from the checkout at runtime and a lone zed.exe cannot start.
+name: build-windows-app
+
+on:
+  push:
+    branches:
+      - ci/build-windows
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 280
+    env:
+      # Keep the target dir small enough to fit on the runner's disk.
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+          # Keep the cached target around; the build is the expensive part.
+          cache-on-failure: true
+
+      - name: cargo build -p zed
+        run: cargo build -p zed --features util/debug-embed
+
+      - name: Report artifact size
+        run: |
+          Get-Item target/debug/zed.exe | Format-List Name, Length
+          Get-PSDrive C | Format-List Used, Free
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zed-windows-debug
+          path: target/debug/zed.exe
+          if-no-files-found: error
+          retention-days: 14
