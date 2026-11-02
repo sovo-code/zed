@@ -1,0 +1,44 @@
+# Verification-only workflow, lives on a throwaway branch of the fork so that the pull
+# request branch stays byte-for-byte what was reviewed.
+#
+# Purpose: compile `crates/project` (which cannot be built by the PR author locally: the
+# dependency graph needs 33 git dependencies and a Linux desktop toolchain) and exercise the
+# Windows-only code path that Linux cannot even type-check, plus run the new `%VAR%`
+# expansion test against the real `std::env::var` lookup.
+name: verify-project-check
+
+on:
+  push:
+    branches:
+      - ci/verify-project-check
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins 1.98.1; this installs it plus the listed targets.
+      - name: Install pinned toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Only cache what this job needs; the default key includes the lockfile hash.
+          workspaces: ". -> target"
+
+      - name: cargo check -p util
+        run: cargo check -p util --locked
+
+      - name: cargo check -p project
+        run: cargo check -p project --locked
+
+      - name: cargo test -p util (shell_env)
+        run: cargo test -p util --locked shell_env
+
+      - name: cargo clippy -p util
+        run: cargo clippy -p util --locked --all-targets -- -D warnings
