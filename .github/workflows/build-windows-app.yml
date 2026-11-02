@@ -2,8 +2,22 @@
 # without setting up a Windows toolchain locally. Lives on a throwaway branch of the fork;
 # the pull request branch does not contain this file.
 #
-# `util/debug-embed` embeds the assets/ tree at compile time. Without it, dev builds read
-# assets from the checkout at runtime and a lone zed.exe cannot start.
+# Two dev-build quirks make a stock `cargo build -p zed` binary unusable when it is copied
+# off the machine that built it:
+#
+# 1. `gpui_windows` compiles its shaders at runtime with `D3DCompileFromFile` when
+#    `debug_assertions` is on, resolving them through `env!("CARGO_MANIFEST_DIR")`. That path
+#    is baked in at compile time (D:\a\zed\zed\crates\gpui_windows on the runner) and does not
+#    exist elsewhere, so startup panics with "Recreating GPU state for DirectWrite: os error 3".
+#    Turning debug assertions off in the dev profile makes build.rs precompile the shaders into
+#    OUT_DIR instead. `CARGO_PROFILE_DEV_DEBUG_ASSERTIONS` is inherited by build scripts, which
+#    is what build.rs checks, so this single variable covers both sides.
+#
+# 2. `util/debug-embed` embeds the assets/ tree at compile time. Without it, dev builds read
+#    assets from the checkout at runtime and a lone zed.exe cannot start.
+#
+# `conpty.dll` and `OpenConsole.exe` are produced in target/debug by crates/zed/build.rs and
+# are loaded from next to the executable, so they have to ship with it.
 name: build-windows-app
 
 on:
@@ -23,6 +37,8 @@ jobs:
       # Keep the target dir small enough to fit on the runner's disk.
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_INCREMENTAL: "0"
+      # Precompile shaders instead of loading them from CARGO_MANIFEST_DIR at startup.
+      CARGO_PROFILE_DEV_DEBUG_ASSERTIONS: "false"
     steps:
       - uses: actions/checkout@v4
 
@@ -32,20 +48,39 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ". -> target"
-          # Keep the cached target around; the build is the expensive part.
+          # The profile settings above are part of the cache key.
+          prefix-key: "v2-standalone"
           cache-on-failure: true
 
       - name: cargo build -p zed
         run: cargo build -p zed --features util/debug-embed
 
-      - name: Report artifact size
+      # Optional: silences "could not find zed-cli from any of: bin/zed.exe, ./cli.exe".
+      - name: cargo build -p cli
+        run: cargo build -p cli
+
+      - name: Report artifact contents
         run: |
-          Get-Item target/debug/zed.exe | Format-List Name, Length
+          $ErrorActionPreference = 'Stop'
+          foreach ($f in 'zed.exe', 'cli.exe', 'conpty.dll', 'OpenConsole.exe') {
+            $p = Join-Path target/debug $f
+            if (Test-Path $p) {
+              Get-Item $p | Format-List Name, Length
+            } else {
+              Write-Host "::warning::missing $f"
+            }
+          }
+          if (-not (Test-Path target/debug/zed.exe)) { throw 'zed.exe was not produced' }
           Get-PSDrive C | Format-List Used, Free
 
       - uses: actions/upload-artifact@v4
         with:
-          name: zed-windows-debug
-          path: target/debug/zed.exe
-          if-no-files-found: error
+          name: zed-windows-standalone
+          # Flat layout: everything must sit in the same directory as zed.exe.
+          path: |
+            target/debug/zed.exe
+            target/debug/cli.exe
+            target/debug/conpty.dll
+            target/debug/OpenConsole.exe
+          if-no-files-found: warn
           retention-days: 14
